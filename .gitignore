@@ -24,3 +24,5 @@ brc-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+/lib/measurements.txt
