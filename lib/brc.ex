@@ -98,10 +98,10 @@ defmodule Brc do
     :ets.insert(@table, {city, temps})
   end
 
-  def run_file(filename) do
+  def run_file(filename, chunk_size \\ @chunk_size) do
     filename
     |> File.stream!(read_ahead: @blob_size)
-    |> Stream.chunk_every(@chunk_size)
+    |> Stream.chunk_every(chunk_size)
     |> Task.async_stream(fn stream -> process_stream(stream) end,
       max_concurrency: @pool_size,
       timeout: :infinity
@@ -127,12 +127,12 @@ defmodule Brc do
     IO.puts("{#{out}}")
   end
 
-  def main(args) do
+  def main(file, size \\ 1_000_000_000) do
     :ets.new(@table, [:set, :public, :named_table, write_concurrency: true])
 
     {uSec, :ok} =
       :timer.tc(fn ->
-        run_file(Enum.at(args, 0))
+        run_file(file, :math.sqrt(size) |> ceil())
         print_table(@table)
         :ok
       end)
