@@ -1,143 +1,156 @@
 defmodule Brc do
-  @pool_size :erlang.system_info(:logical_processors)
+  @pool_size :erlang.system_info(:logical_processors) * 5
   @blob_size 1024 * 1024
   @max_rows 50_000_000
   @chunk_size :math.sqrt(@max_rows) |> ceil()
-  @table :weather_stations
 
-  def process_stream(stream) do
-    for line <- stream do
-      process_line(line)
+  def process_chunk(chunk) do
+    chunk
+    |> Stream.each(&process_line/1)
+    |> Stream.run()
+  end
+
+  def process_line(line) do
+    {station, temp} = parse_line(line)
+
+    table = String.to_atom(station)
+
+    case Worker.add_station(:stations, table) do
+      :station_table_added ->
+        :ets.insert(table, {:temps, {1, temp, temp, temp}})
+
+      :update_table_instead ->
+        update_table(table, temp)
     end
   end
 
-  def process_line(""), do: ""
+  def parse_line(line) do
+    Parse.parse_line(line)
+  end
 
-  def process_line(<<city::208, ";", temp::binary>>),
-    do: update_table(<<city::208>>, Float.parse(temp))
-
-  def process_line(<<city::200, ";", temp::binary>>),
-    do: update_table(<<city::200>>, Float.parse(temp))
-
-  def process_line(<<city::192, ";", temp::binary>>),
-    do: update_table(<<city::192>>, Float.parse(temp))
-
-  def process_line(<<city::184, ";", temp::binary>>),
-    do: update_table(<<city::184>>, Float.parse(temp))
-
-  def process_line(<<city::176, ";", temp::binary>>),
-    do: update_table(<<city::176>>, Float.parse(temp))
-
-  def process_line(<<city::168, ";", temp::binary>>),
-    do: update_table(<<city::168>>, Float.parse(temp))
-
-  def process_line(<<city::160, ";", temp::binary>>),
-    do: update_table(<<city::160>>, Float.parse(temp))
-
-  def process_line(<<city::152, ";", temp::binary>>),
-    do: update_table(<<city::152>>, Float.parse(temp))
-
-  def process_line(<<city::144, ";", temp::binary>>),
-    do: update_table(<<city::144>>, Float.parse(temp))
-
-  def process_line(<<city::136, ";", temp::binary>>),
-    do: update_table(<<city::136>>, Float.parse(temp))
-
-  def process_line(<<city::128, ";", temp::binary>>),
-    do: update_table(<<city::128>>, Float.parse(temp))
-
-  def process_line(<<city::120, ";", temp::binary>>),
-    do: update_table(<<city::120>>, Float.parse(temp))
-
-  def process_line(<<city::112, ";", temp::binary>>),
-    do: update_table(<<city::112>>, Float.parse(temp))
-
-  def process_line(<<city::104, ";", temp::binary>>),
-    do: update_table(<<city::104>>, Float.parse(temp))
-
-  def process_line(<<city::96, ";", temp::binary>>),
-    do: update_table(<<city::96>>, Float.parse(temp))
-
-  def process_line(<<city::88, ";", temp::binary>>),
-    do: update_table(<<city::88>>, Float.parse(temp))
-
-  def process_line(<<city::80, ";", temp::binary>>),
-    do: update_table(<<city::80>>, Float.parse(temp))
-
-  def process_line(<<city::72, ";", temp::binary>>),
-    do: update_table(<<city::72>>, Float.parse(temp))
-
-  def process_line(<<city::64, ";", temp::binary>>),
-    do: update_table(<<city::64>>, Float.parse(temp))
-
-  def process_line(<<city::56, ";", temp::binary>>),
-    do: update_table(<<city::56>>, Float.parse(temp))
-
-  def process_line(<<city::48, ";", temp::binary>>),
-    do: update_table(<<city::48>>, Float.parse(temp))
-
-  def process_line(<<city::40, ";", temp::binary>>),
-    do: update_table(<<city::40>>, Float.parse(temp))
-
-  def process_line(<<city::32, ";", temp::binary>>),
-    do: update_table(<<city::32>>, Float.parse(temp))
-
-  def process_line(<<city::24, ";", temp::binary>>),
-    do: update_table(<<city::24>>, Float.parse(temp))
-
-  def update_table(city, {temp, _}) do
+  def update_table(station, temp) do
     temps =
-      case :ets.lookup(@table, city) do
+      case :ets.lookup(station, :temps) do
         [] ->
           {1, temp, temp, temp}
 
-        [{^city, {len, min, max, mean}}] ->
+        [{:temps, {len, min, max, mean}}] ->
           {len + 1, min(min, temp), max(max, temp), (mean * len + temp) / (len + 1)}
       end
 
-    :ets.insert(@table, {city, temps})
+    :ets.insert(station, {:temps, temps})
   end
 
   def run_file(filename, chunk_size \\ @chunk_size) do
     filename
     |> File.stream!(read_ahead: @blob_size)
     |> Stream.chunk_every(chunk_size)
-    |> Task.async_stream(fn stream -> process_stream(stream) end,
+    |> Task.async_stream(fn chunk -> process_chunk(chunk) end,
       max_concurrency: @pool_size,
       timeout: :infinity
     )
     |> Stream.run()
   end
 
-  def print_table(table) do
+  def print_tables(tables) do
     out =
-      :ets.tab2list(table)
-      |> Task.async_stream(fn {city, {_len, min, max, mean}} ->
-        city <>
-          "=" <>
-          :erlang.float_to_binary(min, decimals: 1) <>
-          "/" <>
-          :erlang.float_to_binary(mean, decimals: 1) <>
-          "/" <> :erlang.float_to_binary(max, decimals: 1)
-      end)
-      |> Enum.map(&elem(&1, 1))
-      |> Enum.sort()
+      tables
+      |> Enum.map(fn table -> format_table(table) end)
       |> Enum.join(",")
 
     IO.puts("{#{out}}")
   end
 
+  def format_table(table) do
+    [{:temps, {_len, min, max, mean}}] = :ets.lookup(table, :temps)
+
+    Atom.to_string(table) <>
+      "=" <>
+      :erlang.float_to_binary(min, decimals: 1) <>
+      "/" <>
+      :erlang.float_to_binary(mean, decimals: 1) <>
+      "/" <> :erlang.float_to_binary(max, decimals: 1)
+  end
+
+  def cleanup_tables(tables) do
+    Worker.get_stations(tables)
+    |> Enum.each(fn table -> :ets.delete(table) end)
+  end
+
   def main(file, size \\ 1_000_000_000) do
-    :ets.new(@table, [:set, :public, :named_table, write_concurrency: true])
+    Worker.start_link(:stations)
 
     {uSec, :ok} =
       :timer.tc(fn ->
         run_file(file, :math.sqrt(size) |> ceil())
-        print_table(@table)
+        print_tables(Worker.get_stations(:stations))
         :ok
       end)
 
     IO.puts("It took #{uSec / 1000} milliseconds")
-    :ets.delete(@table)
+    cleanup_tables(:stations)
   end
+end
+
+defmodule Parse do
+  # Generates a function that takes binary strings and parses them in 2 parts:
+  # - the first part can have max length of 100 bytes and is delimited by a semicolon.
+  # - the second part is a float number that may be followed by a newline character.
+  @compile {:inline, parse_line: 1}
+  for x <- 1..100 do
+    station_len = x * 8
+
+    for i <- 0..99 do
+      temp_int = Integer.to_string(i)
+
+      for d <- 0..9 do
+        temp_dec = <<d + ?0>>
+        temp_str = "#{temp_int}.#{temp_dec}"
+
+        def parse_line(
+              <<station::bitstring-size(unquote(station_len)), ";", unquote(temp_str),
+                _rest::binary>>
+            ),
+            do: {station, unquote(i) + unquote(d) / 10}
+
+        def parse_line(
+              <<station::bitstring-size(unquote(station_len)), ";-", unquote(temp_str),
+                _rest::binary>>
+            ),
+            do: {station, -1 * (unquote(i) + unquote(d) / 10)}
+      end
+    end
+  end
+end
+
+defmodule Worker do
+  use GenServer
+
+  def start_link(name) when is_atom(name) do
+    GenServer.start_link(__MODULE__, :ordsets.new(), name: name)
+  end
+
+  def add_station(name, station) do
+    GenServer.call(name, {:add_station, station})
+  end
+
+  def get_stations(name) do
+    GenServer.call(name, :get_stations)
+  end
+
+  @impl true
+  def init(state), do: {:ok, state}
+
+  @impl true
+  def handle_call({:add_station, station}, _from, state) do
+    if :ordsets.is_element(station, state) do
+      {:reply, :update_table_instead, state}
+    else
+      :ets.new(station, [:public, :named_table, write_concurrency: true])
+      {:reply, :station_table_added, :ordsets.add_element(station, state)}
+    end
+  end
+
+  @impl true
+  def handle_call(:get_stations, _from, state), do: {:reply, state, state}
 end
