@@ -1,7 +1,5 @@
 defmodule Brc do
   @pool_size :erlang.system_info(:logical_processors) * 4
-  @max_rows 50_000_000
-  @chunk_size :math.sqrt(@max_rows) |> ceil()
 
   def process_chunk({chunk, worker}) do
     chunk
@@ -19,7 +17,7 @@ defmodule Brc do
     Parse.parse_line(line)
   end
 
-  def run_file(filename, chunk_size \\ @chunk_size) do
+  def run_file(filename) do
     workers = 1..@pool_size |> Enum.map(fn w -> String.to_atom("BrcRegistry#{w}") end)
 
     workers |> Enum.each(fn w -> BrcRegistry.start(w) end)
@@ -85,10 +83,10 @@ defmodule Brc do
     |> Enum.each(fn e -> :ets.delete(e) end)
   end
 
-  def main(file, size \\ 1_000_000_000) do
+  def main(file) do
     {uSec, :ok} =
       :timer.tc(fn ->
-        run_file(file, :math.sqrt(size) |> ceil())
+        run_file(file)
         :ok
       end)
 
