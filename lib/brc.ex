@@ -1,70 +1,77 @@
 defmodule Brc do
-  @pool_size :erlang.system_info(:logical_processors) * 5
-  @blob_size 1024 * 1024
+  @pool_size :erlang.system_info(:logical_processors) * 4
   @max_rows 50_000_000
   @chunk_size :math.sqrt(@max_rows) |> ceil()
 
-  def process_chunk(chunk) do
+  def process_chunk({chunk, worker}) do
     chunk
-    |> Stream.each(&process_line/1)
+    |> Stream.each(fn line -> process_line(line, worker) end)
     |> Stream.run()
   end
 
-  def process_line(line) do
+  def process_line(line, worker) do
     {station, temp} = parse_line(line)
 
-    table = String.to_atom(station)
-
-    case Worker.add_station(:stations, table) do
-      :station_table_added ->
-        :ets.insert(table, {:temps, {1, temp, temp, temp}})
-
-      :update_table_instead ->
-        update_table(table, temp)
-    end
+    BrcRegistry.register(worker, station, temp)
   end
 
   def parse_line(line) do
     Parse.parse_line(line)
   end
 
-  def update_table(station, temp) do
-    temps =
-      case :ets.lookup(station, :temps) do
-        [] ->
-          {1, temp, temp, temp}
-
-        [{:temps, {len, min, max, mean}}] ->
-          {len + 1, min(min, temp), max(max, temp), (mean * len + temp) / (len + 1)}
-      end
-
-    :ets.insert(station, {:temps, temps})
-  end
-
   def run_file(filename, chunk_size \\ @chunk_size) do
+    workers = 1..@pool_size |> Enum.map(fn w -> String.to_atom("BrcRegistry#{w}") end)
+
+    workers |> Enum.each(fn w -> BrcRegistry.start(w) end)
+
     filename
-    |> File.stream!(read_ahead: @blob_size)
-    |> Stream.chunk_every(chunk_size)
-    |> Task.async_stream(fn chunk -> process_chunk(chunk) end,
+    |> File.stream!()
+    |> Stream.chunk_every(20000)
+    |> Stream.zip(Stream.cycle(workers))
+    |> Task.async_stream(fn {chunk, worker} -> process_chunk({chunk, worker}) end,
       max_concurrency: @pool_size,
       timeout: :infinity
     )
     |> Stream.run()
+
+    print_tables(workers)
   end
 
-  def print_tables(tables) do
+  def print_tables(workers) do
     out =
-      tables
-      |> Enum.map(fn table -> format_table(table) end)
+      workers
+      |> Task.async_stream(fn w -> :ets.tab2list(w) |> Map.new() end,
+        max_concurrency: @pool_size,
+        timeout: :infinity
+      )
+      |> Enum.map(&elem(&1, 1))
+      |> Enum.reduce(fn m, acc -> Map.merge(m, acc, fn _k, v1, v2 -> merge_temps(v1, v2) end) end)
+      |> Enum.map(fn {station, temps} -> format_station(station, temps) end)
+      |> Enum.sort()
       |> Enum.join(",")
 
     IO.puts("{#{out}}")
   end
 
-  def format_table(table) do
-    [{:temps, {_len, min, max, mean}}] = :ets.lookup(table, :temps)
+  def merge_temps({l1, min1, mean1, max1}, {l2, min2, mean2, max2}) do
+    {l1 + l2, min(min1, min2), (mean1 * l1 + mean2 * l2) / (l1 + l2), max(max1, max2)}
+  end
 
-    Atom.to_string(table) <>
+  def merge_station(station, workers) do
+    default = {0, :infinity, 0, -1_000}
+
+    temps =
+      workers
+      |> Enum.reduce(default, fn w, {len, min, mean, max} ->
+        {ln, mn, av, mx} = :ets.lookup_element(w, station, 2, default)
+        {len + ln, min(min, mn), (mean * len + av * ln) / (len + ln), max(max, mx)}
+      end)
+
+    {station, temps}
+  end
+
+  def format_station(station, {_len, min, mean, max}) do
+    station <>
       "=" <>
       :erlang.float_to_binary(min, decimals: 1) <>
       "/" <>
@@ -72,85 +79,80 @@ defmodule Brc do
       "/" <> :erlang.float_to_binary(max, decimals: 1)
   end
 
-  def cleanup_tables(tables) do
-    Worker.get_stations(tables)
-    |> Enum.each(fn table -> :ets.delete(table) end)
+  def cleanup_tables() do
+    :ets.all()
+    |> Enum.filter(fn e -> is_atom(e) and Atom.to_string(e) |> String.contains?("BrcRegistry") end)
+    |> Enum.each(fn e -> :ets.delete(e) end)
   end
 
   def main(file, size \\ 1_000_000_000) do
-    Worker.start_link(:stations)
-
     {uSec, :ok} =
       :timer.tc(fn ->
         run_file(file, :math.sqrt(size) |> ceil())
-        print_tables(Worker.get_stations(:stations))
         :ok
       end)
 
     IO.puts("It took #{uSec / 1000} milliseconds")
-    cleanup_tables(:stations)
+    cleanup_tables()
   end
 end
 
 defmodule Parse do
+  def parse_line(line), do: parse_line(line, line, 0)
+
+  def parse_line(line, <<";", rest::binary>>, count) do
+    <<station::binary-size(count), _::binary>> = line
+    {<<station::binary>>, parse_temp(<<rest::binary>>)}
+  end
+
+  def parse_line(line, <<_::8, rest::binary>>, count), do: parse_line(line, rest, count + 1)
   # Generates a function that takes binary strings and parses them in 2 parts:
   # - the first part can have max length of 100 bytes and is delimited by a semicolon.
   # - the second part is a float number that may be followed by a newline character.
-  @compile {:inline, parse_line: 1}
-  for x <- 1..100 do
-    station_len = x * 8
+  @compile {:inline, parse_temp: 1}
+  for i <- 0..99 do
+    temp_int = Integer.to_string(i)
 
-    for i <- 0..99 do
-      temp_int = Integer.to_string(i)
+    for d <- 0..9 do
+      temp_dec = <<d + ?0>>
+      temp_str = "#{temp_int}.#{temp_dec}"
 
-      for d <- 0..9 do
-        temp_dec = <<d + ?0>>
-        temp_str = "#{temp_int}.#{temp_dec}"
+      def parse_temp(<<unquote(temp_str), _rest::binary>>),
+        do: unquote(i) + unquote(d) / 10
 
-        def parse_line(
-              <<station::bitstring-size(unquote(station_len)), ";", unquote(temp_str),
-                _rest::binary>>
-            ),
-            do: {station, unquote(i) + unquote(d) / 10}
-
-        def parse_line(
-              <<station::bitstring-size(unquote(station_len)), ";-", unquote(temp_str),
-                _rest::binary>>
-            ),
-            do: {station, -1 * (unquote(i) + unquote(d) / 10)}
-      end
+      def parse_temp(<<"-", unquote(temp_str), _rest::binary>>),
+        do: -1 * (unquote(i) + unquote(d) / 10)
     end
   end
 end
 
-defmodule Worker do
-  use GenServer
-
-  def start_link(name) when is_atom(name) do
-    GenServer.start_link(__MODULE__, :ordsets.new(), name: name)
+defmodule BrcRegistry do
+  def start(worker) do
+    :ets.new(worker, [
+      :set,
+      :public,
+      :named_table,
+      write_concurrency: true,
+      decentralized_counters: true
+    ])
   end
 
-  def add_station(name, station) do
-    GenServer.call(name, {:add_station, station})
-  end
-
-  def get_stations(name) do
-    GenServer.call(name, :get_stations)
-  end
-
-  @impl true
-  def init(state), do: {:ok, state}
-
-  @impl true
-  def handle_call({:add_station, station}, _from, state) do
-    if :ordsets.is_element(station, state) do
-      {:reply, :update_table_instead, state}
+  def register(registry, name, temp) do
+    if :ets.insert_new(registry, {name, {1, temp, temp, temp}}) do
+      :ok
     else
-      :ets.new(station, [:public, :named_table, write_concurrency: true])
-      {:reply, :station_table_added, :ordsets.add_element(station, state)}
+      {len, min, mean, max} = :ets.lookup_element(registry, name, 2)
+      updated_val = {len + 1, min(min, temp), (mean * len + temp) / (len + 1), max(max, temp)}
+
+      :ets.insert(registry, {name, updated_val})
     end
   end
 
-  @impl true
-  def handle_call(:get_stations, _from, state), do: {:reply, state, state}
+  def stations(registry) do
+    BrcRegistry.lookup(registry, :stations)
+  end
+
+  def lookup(registry, key) do
+    :ets.lookup_element(registry, key, 2)
+  end
 end
