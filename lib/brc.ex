@@ -1,5 +1,5 @@
 defmodule Brc do
-  @pool_size :erlang.system_info(:logical_processors) * 4
+  @pool_size :erlang.system_info(:logical_processors)
 
   def process_chunk({chunk, worker}) do
     chunk
@@ -23,8 +23,8 @@ defmodule Brc do
     workers |> Enum.each(fn w -> BrcRegistry.start(w) end)
 
     filename
-    |> File.stream!([:raw, :read_ahead])
-    |> Stream.chunk_every(20000)
+    |> File.stream!([:raw, read_ahead: 200_000])
+    |> Stream.chunk_every(10_000 * @pool_size)
     |> Stream.zip(Stream.cycle(workers))
     |> Task.async_stream(fn {chunk, worker} -> process_chunk({chunk, worker}) end,
       max_concurrency: @pool_size,
