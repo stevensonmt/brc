@@ -1,20 +1,49 @@
 defmodule Brc do
   @pool_size :erlang.system_info(:logical_processors)
 
-  def process_chunk({chunk, worker}) do
-    chunk
-    |> Stream.each(fn line -> process_line(line, worker) end)
-    |> Stream.run()
+  def process_file(file, worker_queue) do
+    worker = Enum.take(worker_queue, 1) |> hd()
+    w_q = Stream.drop(worker_queue, 1)
+
+    case :prim_file.read(file, 80_000_000) do
+      :eof ->
+        :ok
+
+      {:ok, buffer} ->
+        buffer =
+          case :prim_file.read_line(file) do
+            :eof ->
+              buffer
+
+            {:ok, line} ->
+              <<buffer::binary, line::binary>>
+          end
+
+        t = Task.async(fn -> process_lines(buffer, worker) end)
+
+        process_file(file, w_q)
+        Task.await(t, :infinity)
+    end
   end
 
-  def process_line(line, worker) do
-    {station, temp} = parse_line(line)
+  def process_lines("", _worker), do: :ok
 
-    BrcRegistry.register(worker, station, temp)
+  def process_lines(lines, worker) do
+    case parse_line(lines) do
+      {station, {temp, rest}} ->
+        BrcRegistry.register(worker, station, temp)
+        process_lines(rest, worker)
+
+      :ok ->
+        :ok
+    end
   end
 
-  def parse_line(line) do
-    Parse.parse_line(line)
+  def parse_line(""), do: :ok
+  def parse_line(<<"\n", rest::binary>>), do: parse_line(rest)
+
+  def parse_line(chunk) do
+    Parse.parse_line(chunk)
   end
 
   def run_file(filename) do
@@ -22,15 +51,9 @@ defmodule Brc do
 
     workers |> Enum.each(fn w -> BrcRegistry.start(w) end)
 
-    filename
-    |> File.stream!([:raw, read_ahead: 200_000])
-    |> Stream.chunk_every(10_000 * @pool_size)
-    |> Stream.zip(Stream.cycle(workers))
-    |> Task.async_stream(fn {chunk, worker} -> process_chunk({chunk, worker}) end,
-      max_concurrency: @pool_size,
-      timeout: :infinity
-    )
-    |> Stream.run()
+    {:ok, file} = :prim_file.open(to_string(filename), [:binary, :read, :read_ahead])
+
+    process_file(file, Stream.cycle(workers))
 
     print_tables(workers)
   end
@@ -44,9 +67,10 @@ defmodule Brc do
       )
       |> Enum.map(&elem(&1, 1))
       |> Enum.reduce(fn m, acc -> Map.merge(m, acc, fn _k, v1, v2 -> merge_temps(v1, v2) end) end)
-      |> Enum.map(fn {station, temps} -> format_station(station, temps) end)
+      |> Task.async_stream(fn {station, temps} -> format_station(station, temps) end)
+      |> Enum.map(&elem(&1, 1))
       |> Enum.sort()
-      |> Enum.join(",")
+      |> Enum.reduce(fn str, acc -> acc <> "," <> str end)
 
     IO.puts("{#{out}}")
   end
@@ -115,11 +139,11 @@ defmodule Parse do
       temp_dec = <<d + ?0>>
       temp_str = "#{temp_int}.#{temp_dec}"
 
-      def parse_temp(<<unquote(temp_str), _rest::binary>>),
-        do: unquote(i) + unquote(d) / 10
+      def parse_temp(<<unquote(temp_str), rest::binary>>),
+        do: {unquote(i) + unquote(d) / 10, rest}
 
-      def parse_temp(<<"-", unquote(temp_str), _rest::binary>>),
-        do: -1 * (unquote(i) + unquote(d) / 10)
+      def parse_temp(<<"-", unquote(temp_str), rest::binary>>),
+        do: {-1 * (unquote(i) + unquote(d) / 10), rest}
     end
   end
 end

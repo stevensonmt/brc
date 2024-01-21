@@ -434,11 +434,12 @@ try do
           {ws, mean} = elem(weather_stations, :rand.uniform(ws_count) - 1)
           delta = :rand.uniform(21) - 11 + :rand.uniform(9) / 10
           temp = mean + delta
+          temp_str = :erlang.float_to_binary(temp, decimals: 1)
 
           if x == last do
-            [ws, ";", to_string(temp)]
+            [ws, ";", temp_str]
           else
-            [ws, ";", to_string(temp), "\n"]
+            [ws, ";", temp_str, "\n"]
           end
         end)
         |> Stream.chunk_every(1000)
