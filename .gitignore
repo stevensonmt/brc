@@ -26,3 +26,5 @@ brc-*.tar
 /tmp/
 
 /lib/measurements.txt
+
+/.lexical/

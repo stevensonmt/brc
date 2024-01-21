@@ -23,7 +23,7 @@ defmodule Brc do
     workers |> Enum.each(fn w -> BrcRegistry.start(w) end)
 
     filename
-    |> File.stream!()
+    |> File.stream!([:raw, :read_ahead])
     |> Stream.chunk_every(20000)
     |> Stream.zip(Stream.cycle(workers))
     |> Task.async_stream(fn {chunk, worker} -> process_chunk({chunk, worker}) end,
@@ -130,8 +130,7 @@ defmodule BrcRegistry do
       :set,
       :public,
       :named_table,
-      write_concurrency: true,
-      decentralized_counters: true
+      write_concurrency: true
     ])
   end
 
