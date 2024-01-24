@@ -5,7 +5,7 @@ defmodule Brc do
     worker = Enum.take(worker_queue, 1) |> hd()
     w_q = Stream.drop(worker_queue, 1)
 
-    case :prim_file.read(file, 80_000_000) do
+    case :prim_file.read(file, 10_000_000) do
       :eof ->
         :ok
 
